@@ -5,7 +5,7 @@
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
 #include <HX711_ADC.h>
-#if defined(ESP8266)|| defined(ESP32) || defined(AVR)
+#if defined(ESP8266) || defined(ESP32) || defined(AVR)
 #include <EEPROM.h>
 #endif
 
@@ -42,31 +42,27 @@ unsigned long sendDataPrevMillis = 0;
 bool signupOK = false;
 
 // Fuzzy logic membership functions
-// Temperature Low (0 - 60 Derajat C)
 float temperatureLow(float temp) {
   if (temp <= 0) return 1.0;
   if (temp >= 60) return 0.0;
   return (60.0 - temp) / 60.0;
 }
 
-// Temperature High (>= 60 Derajat C)
 float temperatureHigh(float temp) {
   if (temp <= 60) return 0.0;
   return 1.0;
 }
 
-// Weight Low (0 - 174 Gram)
 float weightLow(float weight) {
-  if (weight <= 0) return 1.0;     
-  if (weight >= 174) return 0.0;     
-  return (174.0 - weight) / (174.0 - 0); 
+  if (weight <= 0) return 1.0;
+  if (weight >= 174) return 0.0;
+  return (174.0 - weight) / 174.0;
 }
 
-// Weight High (174 - 1000 Gram)
 float weightHigh(float weight) {
-  if (weight <= 174) return 0.0;     
-  if (weight >= 1000) return 1.0;     
-  return (weight - 174.0) / (1000.0 - 174.0); 
+  if (weight <= 174) return 0.0;
+  if (weight >= 1000) return 1.0;
+  return (weight - 174.0) / (1000.0 - 174.0);
 }
 
 void setup() {
@@ -96,7 +92,7 @@ void setup() {
   // Initialize Load Cell
   Serial.println("Inisialisasi Load Cell...");
   LoadCell.begin();
-  float calibrationValue = -720.67;
+  float calibrationValue = -710.92;
   unsigned long stabilizingtime = 2000;
   boolean _tare = true;
   LoadCell.start(stabilizingtime, _tare);
@@ -108,7 +104,7 @@ void setup() {
     Serial.println("Load Cell terdeteksi");
   }
 
-  // Firebase
+  // Firebase setup
   config.database_url = DATABASE_URL;
   config.api_key = API_KEY;
 
@@ -128,7 +124,7 @@ void loop() {
   if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 500 || sendDataPrevMillis == 0)) {
     sendDataPrevMillis = millis();
 
-    // Read temperature
+    // Baca Temperature
     sensors.requestTemperatures();
     float temperature = sensors.getTempCByIndex(0);
     if (temperature == DEVICE_DISCONNECTED_C) {
@@ -140,7 +136,7 @@ void loop() {
       Serial.println(" °C");
     }
 
-    // Read weight from Load Cell
+    // Baca berat
     float weight = 0.0;
     if (LoadCell.update()) {
       weight = LoadCell.getData();
@@ -152,41 +148,46 @@ void loop() {
       Serial.println("Load Cell belum siap, nilai sebelumnya digunakan");
     }
 
-    // Fuzzy logic
-    float tempLow = temperatureLow(temperature);
-    float tempHigh = temperatureHigh(temperature);
-    float wLow = weightLow(weight);
-    float wHigh = weightHigh(weight);
+    // Baca Instruksi Fuzzy Control dari Firebase
+    bool fuzzyEnabled = false;
+    if (Firebase.RTDB.getBool(&fbdo, "kontrol/fuzzy")) {
+      fuzzyEnabled = fbdo.boolData();
+    } else {
+      Serial.println("Gagal membaca kontrol/fuzzy: " + fbdo.errorReason());
+    }
 
-    float ruleHeaterOff = min(tempHigh, wLow);
-    float ruleHeaterOn = 1.0 - ruleHeaterOff;
-    bool heaterState = (ruleHeaterOn >= ruleHeaterOff);
+    // Fuzzy Control ON/OFF
+    bool heaterState = false;
+    if (fuzzyEnabled) {
+      float tempLow = temperatureLow(temperature);
+      float tempHigh = temperatureHigh(temperature);
+      float wLow = weightLow(weight);
+      float wHigh = weightHigh(weight);
 
-    // Relay control
+      float ruleHeaterOff = min(tempHigh, wLow);
+      float ruleHeaterOn = 1.0 - ruleHeaterOff;
+      heaterState = (ruleHeaterOn >= ruleHeaterOff);
+
+      Serial.print("Temp Low: "); Serial.print(tempLow);
+      Serial.print(", Temp High: "); Serial.print(tempHigh);
+      Serial.print(", Weight Low: "); Serial.print(wLow);
+      Serial.print(", Weight High: "); Serial.println(wHigh);
+    } else {
+      Serial.println("Fuzzy belum aktif - Tekan tombol ON");
+    }
+
+    // Control Relay
     digitalWrite(relayPin, heaterState ? HIGH : LOW);
     Serial.println(heaterState ? "Relay: ON" : "Relay: OFF");
 
-    // Send to Firebase0
-    if (Firebase.RTDB.setBool(&fbdo, "kontrol", heaterState))
-      Serial.println("Heater state sent.");
-    else
-      Serial.println("Failed to send heater state: " + fbdo.errorReason());
+    // Kirim status relay ke Firebase
+    Firebase.RTDB.setBool(&fbdo, "kontrol/relay", heaterState);
 
-    if (Firebase.RTDB.setFloat(&fbdo, "monitoring/temperature", temperature))
-      Serial.println("Temperature sent.");
-    else
-      Serial.println("Failed to send temperature: " + fbdo.errorReason());
-
-    if (Firebase.RTDB.setFloat(&fbdo, "monitoring/weight", weight))
-      Serial.println("Weight sent.");
-    else
-      Serial.println("Failed to send weight: " + fbdo.errorReason());
-
-    // Debug fuzzy values
-    Serial.print("Temp Low: "); Serial.print(tempLow);
-    Serial.print(", Temp High: "); Serial.print(tempHigh);
-    Serial.print(", Weight Low: "); Serial.print(wLow);
-    Serial.print(", Weight High: "); Serial.println(wHigh);
+    // Kirim parameter monitoring
+    Firebase.RTDB.setFloat(&fbdo, "monitoring/temperature", temperature);
+    Firebase.RTDB.setFloat(&fbdo, "monitoring/weight", weight);
+    
   }
+
   delay(200);
 }
